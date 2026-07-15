@@ -371,6 +371,10 @@ syscall番号を観測する実行時コンポーネントを要する。native 
 **e9patch の計装はユーザ空間で動く**ので、MTDの判定点を**プロセス内**へ移す。
 フックが信頼バイナリの**全 `syscall` ゲート**に座り、ポリシーを強制する。
 
+> **用語**：**計装（instrumentation）**＝e9patch でプログラムの `syscall` の直前に
+> 監視コード（フック）を埋め込むこと。本演習では **MTD保護なし = `victim`**、
+> **MTD保護あり = `victim.mtd`**（`.mtd` が目印）と呼ぶ。
+
 ---
 
 ## 21. システムコールMTDフレームワークの概要 / Framework Overview（in-process）

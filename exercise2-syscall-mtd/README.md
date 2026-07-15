@@ -12,6 +12,28 @@ on Apple Silicon.*
 
 ---
 
+## 用語 / Terminology（最初に読んでください）
+
+- **計装（けいそう / instrumentation）** … e9patch を使って、プログラムの各 `syscall`
+  命令の直前に **MTD の監視コード（フック）を埋め込む**こと。プログラムの動作は変えず、
+  「見張り」を差し込むイメージ。
+- 本演習では2つの版を使い分ける：
+
+  | 呼び方 | ファイル | 意味 |
+  |---|---|---|
+  | **MTD保護なし**（素のプログラム）| `victim` | 監視コードを埋め込んでいない、ただのプログラム |
+  | **MTD保護あり**（MTDを組み込んだ版）| `victim.mtd` | e9patch で監視コードを埋め込んだ版（`.mtd` が目印）|
+
+- つまり「計装あり／なし」＝「**MTD保護あり（`victim.mtd`）／なし（`victim`）**」。
+  攻撃を仕掛けたとき、`victim`（保護なし）はシェルを奪われ、`victim.mtd`（保護あり）は
+  ゲートが `execve` を遮断する、という違いを体験する。
+
+*"Instrumentation" = using e9patch to embed the MTD monitor (a hook) right before each
+`syscall` instruction. `victim` = the plain program (no MTD); `victim.mtd` = the
+MTD-protected build. The demo contrasts the two under attack.*
+
+---
+
 ## なぜプロセス内方式なのか / Why in-process
 
 「システムコール番号を実行時に監視・シャッフルする」古典的なMTDは、プロセスが実際に
@@ -161,11 +183,11 @@ int main(int argc, char **argv)
 ```
 
 - **(1) 良性パス**: `write`（番号1）を発行。既定ポリシー（遮断=execve/execveat）では許可 →
-  そのままメッセージが表示される。計装済みだが「通す」動作を確認できる。
+  そのままメッセージが表示される。MTD保護あり（`victim.mtd`）でも「通す」動作を確認できる。
 - **(2) 攻撃パス（`pwn`）**: `execve("/bin/sh", ...)` を発行。これは
   「制御を奪われてシェル起動に至った」状況の**再現**。
-  - `./victim pwn`（計装なし）→ execve が実行されシェルが起動（`### SHELL OBTAINED`）。
-  - `./victim.mtd pwn`（計装あり）→ `execve` の直前でフックが発火し、ポリシー違反として
+  - `./victim pwn`（**MTD保護なし**）→ execve が実行されシェルが起動（`### SHELL OBTAINED`）。
+  - `./victim.mtd pwn`（**MTD保護あり**）→ `execve` の直前でフックが発火し、ポリシー違反として
     **遮断（`exit(42)`）**。execve は実行されない。
 - **攻撃モデルとの対応**: 現実の攻撃では、この `execve` は攻撃者が用意したペイロードが
   プログラムの syscall ゲートに funnel してくることに相当する。`victim` では議論を単純化する
