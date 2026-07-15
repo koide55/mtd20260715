@@ -1,27 +1,54 @@
-# 演習2: システムコールレベルMTD（システムコール番号シャッフリング）
-# Exercise 2: System-call-level MTD (System Call Number Shuffling)
+# 演習2: システムコールレベルMTD（プロセス内・syscallゲート監視）
+# Exercise 2: System-call-level MTD (in-process syscall-gate monitor)
 
-**e9patch v1.0.1（2026年6月リリース）向けに全面刷新。**
-旧演習が前提としていた AWS EC2 の事前構築済み環境（`~/work/mtd`, Rust製tracer, カーネル
-リコンフィグ）を廃し、**任意のx86_64 Linux上で `./setup.sh` により再現できる自己完結型**
-に作り直した。
+**e9patch v1.0.1 向け・プロセス内方式。**
+旧演習の AWS EC2 / カーネルリコンフィグ前提を廃し、さらに ptrace にも依存しない
+**プロセス内方式**に作り直した。これにより **Apple Silicon の Docker Desktop
+(Rosetta 2) でもそのまま動作**する。
 
-*Fully reworked for **e9patch v1.0.1** (June 2026). The old AWS-EC2 / Rust-tracer / kernel-
-reconfig setup is replaced by a self-contained lab that builds everything from source on any
-x86_64 Linux via `./setup.sh`.*
+*In-process design for e9patch v1.0.1. It removes the old AWS-EC2 / kernel-reconfig
+setup AND the ptrace dependency, so it runs as-is under Docker Desktop's Rosetta 2
+on Apple Silicon.*
+
+---
+
+## なぜプロセス内方式なのか / Why in-process
+
+「システムコール番号を実行時に監視・シャッフルする」古典的なMTDは、プロセスが実際に
+発行するシステムコール番号を観測する実行時コンポーネントを必要とする。native x86_64 では
+これを ptrace で実装できるが、**Docker Desktop の Rosetta 2（Apple Silicon）では成立しない**：
+
+- Rosetta は **ARM64 の Linux カーネル**上で x86_64 ユーザコードを翻訳実行する。
+- x86_64 の `syscall` 命令に来ると、Rosetta が対応する **ARM64 のシステムコール**を発行する。
+- そのため ptrace / seccomp がカーネル境界で見るのは ARM64 のシステムコールで、
+  x86_64 のシステムコール番号（`orig_rax`）は存在しない（実測で `orig_rax=0`、さらに
+  Rosetta 由来の SIGTRAP で ptrace 監視が破綻することを確認済み）。
+
+一方 **e9patch の計装コードは完全にユーザ空間で動く**（Rosetta が他のx86_64コードと同様に翻訳）。
+そこで MTD の判定点を**プロセス内**へ移す：フックが**信頼バイナリの全 `syscall` ゲート**に座り、
+per-deployment のシステムコールポリシーを強制する。e9patch は syscall 命令を100%計装するため、
+非実行スタック環境で **バイナリ自身の `syscall` ガジェットを再利用してシェルを起動する
+コード再利用攻撃（ret2syscall / ROP）**もこのゲートを通り、検知・遮断できる。
+
+*e9patch instrumentation runs entirely in user space, so we move the MTD enforcement point
+INTO the process. The hook sits on every syscall gate of the trusted binary and enforces a
+per-deployment policy. Since e9patch patches 100% of syscall sites, a code-reuse payload
+(ret2syscall/ROP on an NX stack) that spawns a shell through the program's own syscall
+gadget passes through the gate and is blocked.*
+
+> native x86_64 環境向けの「番号ランダム化 + ptrace で外部syscallを検知」する版に関心が
+> あれば別途用意可能（Rosettaでは不可）。本演習はプロセス内方式に統一している。
 
 ---
 
 ## 前提 / Prerequisites
 
-- **x86_64 の Linux**（e9patchはx86_64 ELF専用 / e9patch rewrites x86_64 ELF only）
-- **推奨: Docker Compose**（リポジトリ同梱。Apple Silicon でも Rosetta 2 で動作）
-- ローカル実行の場合: `git`, `gcc`, `g++`, `make`, `python3`
-- （応用デモのみ / advanced demo only）`pwntools`（Dockerイメージには導入済み）
+- **推奨: Docker Compose**（同梱。Apple Silicon でも Rosetta 2 で動作）
+- ローカル実行の場合: **x86_64 Linux** + `git`, `gcc`, `g++`, `make`
 
 ## クイックスタート（Docker 推奨）/ Quick start (Docker, recommended)
 
-リポジトリのルートで（e9patch はイメージに構築済み、`setup.sh` 不要）：
+リポジトリのルートで（e9patch はイメージに構築済み）：
 
 ```console
 $ docker compose up -d --build
@@ -29,41 +56,44 @@ $ docker compose exec lab ./exercise2-syscall-mtd/run_demo.sh
 ```
 
 > Apple Silicon では Docker Desktop の「Use Rosetta for x86/amd64 emulation」を有効に。
-> ptrace 用の `SYS_PTRACE` / `seccomp:unconfined` は compose 側で付与済み。
+> ptrace を使わないため特別な権限（SYS_PTRACE 等）は不要。
 
-## クイックスタート（ローカル）/ Quick start (local, without Docker)
+## クイックスタート（ローカル / x86_64 Linux）
 
 ```console
-$ ./setup.sh        # e9patch v1.0.1 を取得・ビルド（初回のみ / first time only）
-$ make              # tracer・デモプログラム・instrumented バイナリを作成
-$ ./run_demo.sh     # デモ実行 / run the demonstration
+$ ./setup.sh          # e9patch v1.0.1 をソースからビルド（初回のみ）
+$ ./run_demo.sh
 ```
 
-期待される出力 / Expected output:
+---
+
+## 期待される出力 / Expected output
 
 ```
-----------------------------------------------------------------------
-1) Trusted program through the MTD tracer (should run normally):
-----------------------------------------------------------------------
-[mtd] MTD_KEY = 0x5f3a0000 (per-run random)
+1) Trusted program with the MTD gate active (runs normally):
+[mtd] syscall gate active (instance 0x....); blocking: execve(59) execveat(322)
 Hello, world
-[mtd] 23 syscalls translated, 0 intrusions detected
 
-----------------------------------------------------------------------
-2a) Un-instrumented 'shellcode' WITHOUT the tracer (attack succeeds):
-----------------------------------------------------------------------
-### SHELL OBTAINED (uid=1000)
+2a) Trusted 'victim' program, benign run:
+[mtd] syscall gate active (instance 0x....); blocking: execve(59) execveat(322)
+victim: doing benign work (this printf is a write syscall)
 
-----------------------------------------------------------------------
-2b) Same 'shellcode' WITH the MTD tracer (attack detected & blocked):
-----------------------------------------------------------------------
-[mtd] MTD_KEY = 0x2c110000 (per-run random)
-[mtd] Invalid system call detected (raw execve, rax=59): INTRUSION BLOCKED
-[mtd] target stopped -- shell denied
+2b) 'victim pwn' WITHOUT MTD (shell-spawning path succeeds):
+victim: doing benign work (this printf is a write syscall)
+### SHELL OBTAINED (uid=0)
+
+2c) 'victim pwn' WITH the MTD syscall gate (execve blocked):
+[mtd] syscall gate active (instance 0x....); blocking: execve(59) execveat(322)
+victim: doing benign work (this printf is a write syscall)
+[mtd] INTRUSION BLOCKED: disallowed system call execve (rax=59) at syscall gate 0x...
+(exit 42 from victim.mtd: 42 means the MTD gate blocked the shell.)
+
+3) Diversified policy (MTD_BLOCK): same binary, different gate per run.
+[mtd] syscall gate active (instance 0x....); blocking: write(1) execve(59) execveat(322)
+[mtd] INTRUSION BLOCKED: disallowed system call write (rax=1) at syscall gate 0x...
 ```
 
-> 注: `MTD_KEY` と翻訳された syscall 数は実行ごと・環境ごとに変わる。
-> Note: `MTD_KEY` and the translated syscall count vary per run / per environment.
+`instance` の値と `gate` アドレスは実行ごとに変わる。
 
 ---
 
@@ -71,119 +101,64 @@ Hello, world
 
 | ファイル / File | 役割 / Role |
 |---|---|
-| `setup.sh` | e9patch v1.0.1 をソースからビルド / build e9patch v1.0.1 from source |
-| `syscall_mtd.c` | e9patchフック。各 `syscall` 命令の直前で `rax` にKEYを加算 / e9patch hook, KEY-shifts `rax` |
-| `mtd_tracer.c` | ptrace監視プロセス。KEYを引いて実番号に戻し、生の危険syscallを検知 / ptrace supervisor |
-| `hello.c` | 正規プログラム / benign baseline |
-| `evil.c` | 生の `execve` を行う「シェルコード相当」 / raw-execve stand-in for shellcode |
-| `smashme.c` + `exploit.py` | 応用: 実際のスタックオーバーフロー攻撃 / advanced: real overflow exploit |
-| `Makefile`, `run_demo.sh` | ビルド・デモ / build & demo orchestration |
+| `syscall_mtd.c` | e9patchフック。全 `syscall` ゲートでポリシーを強制し、禁止syscallを検知・遮断 |
+| `hello.c` | 正規プログラム（計装しても普通に動く）/ benign baseline |
+| `victim.c` | 正規プログラムだが `pwn` 指定でシェル起動パスに入る（攻撃をシミュレート）|
+| `setup.sh` | ローカル用: e9patch v1.0.1 をビルド（Dockerでは不要）|
+| `Makefile`, `run_demo.sh` | ビルド・デモ |
 
----
-
-## 仕組み / How it works
-
-```
-                 per-run random KEY  (環境変数 MTD_KEY で共有 / shared via env)
-                          │
-  ┌────────────────┐   ptrace   ┌────────────────────────────────────────┐
-  │ mtd_tracer      │◀─(監視)──▶│ target (e9patchでsyscallをフック済み)     │
-  │ ・KEYを生成/配布 │           │  正規syscall:  rax += KEY  (フックが実行)   │
-  │ ・entry で:      │           │  注入コード:   rax は生の実番号のまま       │
-  │   rax>=KEY→翻訳  │           └────────────────────────────────────────┘
-  │   rax<KEY & 危険 │
-  │        →侵入遮断 │
-  └────────────────┘
-```
-
-1. **フック (`syscall_mtd.c`)** … e9tool が正規バイナリの各 `syscall` 命令の直前に挿入。
-   実行時に per-run のKEYを `rax`（syscall番号）へ加算し、番号を「シャッフル」する。
-   フック自身は一切syscallを呼ばない（`getenv` は環境配列を読むだけ）。
-2. **tracer (`mtd_tracer.c`)** … ptraceでKEYを引いて実番号に戻してからカーネルへ渡す。
-   KEYでシフトされていない生の syscall（＝instrumentされていないコード）のうち、
-   `execve`/`execveat` のような危険なものを **侵入として遮断**する。
-   起動時のローダ等の良性な生syscallは許可するため、誤検知に強い。
-
-**なぜ注入シェルコードだけ捕まるのか / Why only injected code is caught:**
-正規バイナリの `syscall` 命令は**書き換え時に既知**なので全てフック済み（＝シフトされる）。
-注入シェルコードは**実行時にスタック上に現れる**ためフックされず、番号は生のまま。
-この差を tracer が検出する。
-
----
-
-## e9patch コマンド（v1.0.1 構文）/ e9patch commands (v1.0.1 syntax)
-
-`Makefile` が実行する中核コマンド：
+## e9patch コマンド（v1.0.1 構文）
 
 ```console
-# フックをe9patch同梱の stdlib.c に対してコンパイル
-$ e9patch/e9compile.sh syscall_mtd.c -I e9patch/examples
+# フックをコンパイル（静的リンク対象のため -DNO_GLIBC=1 が必須）
+$ e9patch/e9compile.sh syscall_mtd.c -I e9patch/examples -DNO_GLIBC=1
 
-# 各 syscall 命令の直前にフックを挿入
+# 各 syscall 命令の直前にMTDゲートを挿入
 $ e9patch/e9tool -M 'asm=/syscall/' \
-      -P 'before entry(state)@syscall_mtd' hello -o hello.mtd
+      -P 'before entry(state)@syscall_mtd' victim -o victim.mtd
 ```
 
-**旧版（〜2021）からの構文変更 / Syntax changes from the old slides:**
+**旧版（〜2021）からの構文変更:**
 
 | | 旧版 / Old | 新版 / New (v1.0.1) |
 |---|---|---|
 | マッチ | `--match 'asm=sys(?:enter\|call)'` | `-M 'asm=/syscall/'` |
 | パッチ | `--action 'call [before] func(&rax)@func'` | `-P 'before entry(state)@syscall_mtd'` |
-| 引数 | `&rax`（ポインタ渡し） | `state`（全レジスタ構造体、`state->rax` を直接変更）|
-| ヘッダ | 手書き `stdlib.c` | 同梱 `examples/stdlib.c`（`SYS_*`,`STATE`,`getenv` 等完備）|
+| 引数 | `&rax` | `state`（`state->rax`, `state->rip` を参照）|
+| ヘッダ | 手書き `stdlib.c` | 同梱 `examples/stdlib.c` + `-DNO_GLIBC=1` |
 
----
+## ポリシーのカスタマイズ / Customizing the policy
 
-## 応用デモ: 本物のバッファオーバーフロー / Advanced: real buffer overflow
-
-`smashme` は `gets()` による古典的スタックオーバーフローを持つ。`exploit.py` は
-`jmp rsp` ガジェット経由でスタック上のシェルコード（生の `execve`）を実行する。
+環境変数 `MTD_BLOCK` に遮断したいsyscall番号をカンマ区切りで指定（既定: `59,322` = execve/execveat）。
 
 ```console
-$ make smashme smashme.mtd
-$ pip install pwntools
-$ setarch $(uname -m) -R python3 exploit.py --no-mtd   # → シェル奪取 / shell
-$ setarch $(uname -m) -R python3 exploit.py --mtd      # → 検知・遮断 / blocked
+$ MTD_BLOCK="59,322,257" ./victim.mtd     # openat も遮断
 ```
 
-> 本物のメモリ破壊攻撃はガジェットアドレスやASLR無効化に依存し**環境依存**。
-> 検出メカニズムを確実に見せるだけなら `./run_demo.sh`（`evil` 使用）で十分。
-> A real exploit is environment-specific; `run_demo.sh` reliably shows the mechanism.
+デプロイやサーバごとに監視・遮断するsyscall集合を変える／時間で回転させることで、
+攻撃者が前提にできるsyscall ABIを不確実にする（＝moving target）。
 
 ---
 
 ## グループ演習 / Group discussion
 
 1. Webサービスに外部からバイナリが送り込まれ実行される未知の脆弱性を仮定する。
-   システムコールレベルMTDが組み込まれていれば攻撃を検出・防御できるか。
+   このプロセス内syscallゲート監視で攻撃を検出・防御できるか。できない攻撃形態は何か。
+   （ヒント: 実行可能スタック上の独自 `syscall` 命令は計装対象外。NXスタック＋ret2syscallは対象内。）
 2. 演習1（URL等）のMTDと同時に組み合わせた場合、「平均攻撃成功時間間隔」はどう変化するか。
-3. 本フレームワークは syscall 番号をランダム化する。どのような効果があるか。
-   （syscall命令ごと・時間ごとにKEYを変える拡張の是非も議論せよ。）
-4. **旧版との相違点**: 旧演習はLinuxカーネルのリコンフィグを伴った。本版
-   （e9patch v1.0.1 + ptraceによるユーザ空間実装）の相違点・利点・欠点は何か。
+3. 遮断集合をデプロイ／時間ごとに多様化・回転させることの効果と、正規利用者への影響。
+4. **旧版との相違点**: 旧演習はLinuxカーネルのリコンフィグ、その後の版は ptrace を伴った。
+   本版（e9patch v1.0.1・プロセス内・カーネル非依存）の相違点・利点・欠点は何か。
+5. Rosetta のような翻訳環境では、なぜカーネル境界（ptrace/seccomp）での
+   syscall番号MTDが成立しないのか。プロセス内方式はその制約をどう回避しているか。
 
 ---
 
-## 検証状況 / Verification status（重要 / important）
+## 検証状況 / Verification status
 
-本リポジトリの作成環境は **aarch64（ARM）** であり、e9patchはx86_64専用のため、
-x86_64バイナリの書き換え・実行によるエンドツーエンドの動作確認は**この環境では実施できていない**。
-実施済みの検証は次のとおり：
-
-*This repository was authored on an **aarch64 (ARM)** host. Since e9patch is x86_64-only, the
-full x86_64 rewrite/run pipeline could NOT be executed here. What was verified:*
-
-- e9patch **v1.0.1 のソースを実際に取得**し、`e9compile.sh` / `e9tool` の構文、
-  同梱 `examples/stdlib.c` のAPI（`init(argc,argv,envp)`, `environ`, `getenv`, `atoll`,
-  `struct STATE`{`int64_t rax`}）を照合済み。フックはこのAPIに厳密に準拠。
-- E9Tool User's Guide のパッチ文法（`PATCH ::= [before|replace|after] TRAMPOLINE`）で
-  `-M`/`-P` 構文を確認済み。
-- `hello.c` / `evil.c` はネイティブに `-Wall` で警告なくコンパイル確認済み。
-- `mtd_tracer.c` は標準的なptrace実装（x86_64ガード付き）。
-- **演習1 (`mtdnet.py`) はサンドボックスで完全に実行・動作確認済み**。
-
-受講生環境（Docker Desktop + Rosetta 2、または x86_64 Linux）で
-`docker compose up -d --build && docker compose exec lab ./exercise2-syscall-mtd/run_demo.sh`
-を実行して最終確認することを推奨。`docker-compose.yml` は Dockerfile / compose 構文とも
-検証済みだが、Dockerビルド自体は本サンドボックス（docker不在）では未実行。
+- **e9patch v1.0.1 のビルドと計装は Docker (amd64/Rosetta) 上で成功を確認済み**（`num_patched 100%`）。
+- ptrace 方式が Rosetta で不可であることを実測で確認（`orig_rax=0` + SIGTRAP）。本演習は
+  その知見を踏まえプロセス内方式に統一した。
+- コード（フック/デモ）は e9patch v1.0.1 の API（`init(argc,argv,envp)`, `struct STATE`,
+  `getenv`, `getrandom`, `exit`, `SYS_execve/execveat`）に準拠。
+- Docker上での `run_demo.sh` の最終実行確認は受講生環境で実施のこと。

@@ -22,13 +22,12 @@ mtd20260715/
 │   ├── README.md
 │   ├── mtdnet.py                  ← MTD機能付きWebアプリ / MTD web app
 │   └── demo.sh
-└── exercise2-syscall-mtd/         ← 演習2: システムコールレベルMTD
+└── exercise2-syscall-mtd/         ← 演習2: システムコールレベルMTD（プロセス内）
     ├── README.md
-    ├── setup.sh                   ← e9patch v1.0.1 をビルド / build e9patch v1.0.1
-    ├── syscall_mtd.c              ← e9patchフック / e9patch hook
-    ├── mtd_tracer.c               ← ptrace監視プロセス / ptrace supervisor
-    ├── hello.c / evil.c           ← 正規プログラム / 「シェルコード」相当
-    ├── smashme.c / exploit.py     ← 応用: 本物のオーバーフロー攻撃
+    ├── setup.sh                   ← ローカル用: e9patch v1.0.1 をビルド（Docker不要）
+    ├── syscall_mtd.c              ← e9patchフック（syscallゲート監視）/ in-process MTD monitor
+    ├── hello.c                    ← 正規プログラム / benign baseline
+    ├── victim.c                   ← シェル起動パスを持つ被害プログラム / victim with a shell path
     ├── Makefile
     └── run_demo.sh
 ```
@@ -92,15 +91,17 @@ $ ./setup.sh && make && ./run_demo.sh
 
 - スライド全35ページをMarkdown化（日英併記を維持）。
 - 演習2を **e9patch v1.0.1** の新しい `-M`/`-P` 構文と同梱 `stdlib.c` API に更新。
-- 演習2からAWS EC2・カーネルリコンフィグ前提を排除し、**自己完結型**（`setup.sh` で
-  e9patchをソースからビルド）に再構築。
+- 演習2からAWS EC2・カーネルリコンフィグ前提を排除。さらに **ptrace 非依存の
+  プロセス内方式**に再設計し、**Apple Silicon の Docker (Rosetta 2) でも動作**するように。
+- **Docker Compose** で受講生が同一環境を再現できるように（`Dockerfile` に e9patch 同梱）。
 - 演習1のWebアプリ (`mtdnet.py`) をPython 3.12+対応・レース排除版に更新。
 
 ## 検証 / Verification
 
 - 演習1 (`mtdnet.py`, `demo.sh`) はサンドボックスで**実行・動作確認済み**。
-- 演習2はe9patch v1.0.1のソース・公式ドキュメントに照合してコード/コマンドを確認。
-  作成環境がARMのためx86_64でのエンドツーエンド実行は未実施。
+- 演習2の **e9patch v1.0.1 ビルド・計装は Docker (amd64/Rosetta) 上で成功を確認済み**。
+  ptrace 方式が Rosetta で不可であることを実測（`orig_rax=0`）した上で、プロセス内方式へ移行。
+  コードは e9patch v1.0.1 の API に照合済み。デモの最終実行は受講生環境で確認のこと。
   詳細は `exercise2-syscall-mtd/README.md` の「検証状況」を参照。
 
 ## ライセンス / License

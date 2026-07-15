@@ -1,55 +1,112 @@
 /*
- * syscall_mtd.c  --  e9patch v1.0.1 instrumentation for System-call-number MTD.
+ * syscall_mtd.c  --  e9patch v1.0.1 in-process System-call MTD monitor.
  *
- * This file is compiled with e9compile.sh and injected by e9tool BEFORE every
- * `syscall` instruction of a trusted (legitimate) binary:
+ * Compiled with e9compile.sh and injected by e9tool BEFORE every `syscall`
+ * instruction of a trusted binary:
  *
- *   $ $E9PATCH/e9compile.sh syscall_mtd.c
+ *   $ $E9PATCH/e9compile.sh syscall_mtd.c -I $E9PATCH/examples -DNO_GLIBC=1
  *   $ $E9PATCH/e9tool -M 'asm=/syscall/' \
- *         -P 'before entry(state)@syscall_mtd' hello -o hello.mtd
+ *         -P 'before entry(state)@syscall_mtd' victim -o victim.mtd
  *
- * At run time the hook adds a per-run random KEY (supplied by the mtd_tracer
- * ptrace supervisor via the MTD_KEY environment variable) to the syscall
- * number in %rax. The trusted binary's syscalls therefore leave with a
- * "shifted" (randomized) number; the tracer subtracts KEY to recover the real
- * number before the kernel runs it.
+ * WHY THIS DESIGN (in-process, no ptrace)
+ * --------------------------------------
+ * The classic "system-call number randomization" MTD needs a runtime component
+ * that observes the syscall numbers the process actually issues. On a native
+ * x86_64 host that component can be a ptrace supervisor. But under Docker
+ * Desktop's Rosetta 2 (Apple Silicon), x86_64 user code runs on an ARM64
+ * kernel: Rosetta translates each x86_64 `syscall` into the equivalent ARM64
+ * syscall, so a ptrace/seccomp observer at the kernel boundary never sees the
+ * x86_64 syscall number (orig_rax reads as 0). Kernel-boundary syscall-number
+ * MTD is therefore impossible under Rosetta.
  *
- * Injected shellcode is NOT instrumented (it appears on the stack at run time,
- * after rewriting), so its syscalls carry raw, un-shifted numbers. The tracer
- * treats an un-shifted sensitive syscall (e.g. execve) as an intrusion.
+ * e9patch instrumentation, however, runs entirely in user space (Rosetta
+ * translates it like any other x86_64 code). So we move the MTD enforcement
+ * point INTO the process: the hook sits on every `syscall` gate of the trusted
+ * binary and enforces a per-deployment syscall policy. Because e9patch patches
+ * 100% of the binary's syscall sites, a code-reuse payload (ret2syscall / ROP
+ * on a non-executable stack) that funnels control into the program's OWN
+ * `syscall` gadget to spawn a shell is observed here -- and blocked.
  *
- * The hook itself performs NO syscalls (getenv() only reads the environ array),
- * so it never confuses the tracer.
+ * The "moving target" element: the monitored/blocked syscall set is diversified
+ * per deployment (configurable via the MTD_BLOCK environment variable) and can
+ * be rotated over time, so an attacker cannot rely on a fixed syscall ABI being
+ * permitted. By default the shell-spawning syscalls execve/execveat are blocked.
  *
- * API used (all provided by e9patch v1.0.1 examples/stdlib.c):
- *   - void init(int argc, char **argv, char **envp)  : one-time init
- *   - char **environ ; char *getenv(const char *)    : read MTD_KEY
- *   - long long atoll(const char *)                  : parse KEY
- *   - struct STATE { ... int64_t rax; ... }           : full register state
+ * The hook performs no syscalls on the fast path (getenv() only reads the
+ * environ array), so it never re-enters itself.
  */
 
 #include "stdlib.c"
 
-static long key = 0;
+/* Blocked ("sensitive") syscalls. Shell-spawning execve/execveat by default. */
+#define MAX_BLOCK 16
+static long blocked[MAX_BLOCK];
+static int  n_blocked = 0;
+static unsigned nonce = 0;
 
-/*
- * One-time initialization, run before the target's entry point.
- * environ must be set from envp before getenv() can be used.
- */
+static const char *name_of(long n)
+{
+    switch (n) {
+        case SYS_execve:   return "execve";
+        case SYS_execveat: return "execveat";
+        case 0:            return "read";
+        case 1:            return "write";
+        case 2:            return "open";
+        case 257:          return "openat";
+        default:           return "syscall";
+    }
+}
+
+/* Parse a comma-separated list of syscall numbers from MTD_BLOCK, e.g. "59,322". */
+static void parse_block(const char *s)
+{
+    while (s != NULL && *s != '\0' && n_blocked < MAX_BLOCK) {
+        while (*s == ',' || *s == ' ') s++;
+        if (*s == '\0') break;
+        long v = 0; int any = 0;
+        while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; any = 1; }
+        if (any) blocked[n_blocked++] = v;
+        while (*s != '\0' && *s != ',') s++;
+    }
+}
+
 void init(int argc, char **argv, char **envp)
 {
     environ = envp;
-    const char *k = getenv("MTD_KEY");
-    key = (k != NULL ? (long)atoll(k) : 0);
+
+    const char *b = getenv("MTD_BLOCK");
+    if (b != NULL && *b != '\0') {
+        parse_block(b);
+    } else {
+        blocked[n_blocked++] = SYS_execve;      /* 59  */
+        blocked[n_blocked++] = SYS_execveat;    /* 322 */
+    }
+
+    /* Per-run instance nonce -- illustrates the diversified/moving policy. */
+    (void)getrandom(&nonce, sizeof(nonce), 0);
+
+    fprintf(stderr, "[mtd] syscall gate active (instance 0x%08x); blocking:", nonce);
+    for (int i = 0; i < n_blocked; i++)
+        fprintf(stderr, " %s(%ld)", name_of(blocked[i]), blocked[i]);
+    fprintf(stderr, "\n");
 }
 
 /*
- * Called immediately BEFORE each `syscall` instruction of the trusted binary.
- * Shift the syscall number by the per-run KEY. Modifying state->rax updates the
- * real %rax register (per the E9Tool user guide), so the syscall leaves with a
- * randomized number that only the cooperating tracer knows how to undo.
+ * Runs BEFORE each `syscall` instruction of the trusted binary. If the syscall
+ * number is on the blocked list, this is an anomaly (e.g. a code-reuse payload
+ * spawning a shell through the program's own syscall gate): report and stop the
+ * process so the syscall never executes. Otherwise return and let it proceed.
  */
 void entry(struct STATE *state)
 {
-    state->rax += key;
+    long num = state->rax;
+    for (int i = 0; i < n_blocked; i++) {
+        if (num == blocked[i]) {
+            fprintf(stderr,
+                "[mtd] INTRUSION BLOCKED: disallowed system call %s (rax=%ld) "
+                "at syscall gate 0x%lx\n",
+                name_of(num), num, (unsigned long)state->rip);
+            exit(42);           /* terminate before the syscall runs */
+        }
+    }
 }

@@ -1,40 +1,50 @@
 #!/usr/bin/env bash
 #
-# run_demo.sh -- System-call-number MTD demonstration (e9patch v1.0.1).
+# run_demo.sh -- in-process System-call MTD demonstration (e9patch v1.0.1).
 #
-# Shows two things:
-#   1. A trusted, instrumented program (hello.mtd) runs normally under the
-#      MTD tracer -- its KEY-shifted syscalls are translated back.
-#   2. Un-instrumented code that issues a raw execve (evil, standing in for
-#      injected shellcode) is DETECTED and BLOCKED by the tracer, even though
-#      it spawns a shell when run directly.
+# Shows:
+#   1. A trusted program (hello.mtd) runs normally with the MTD gate active.
+#   2. A trusted program with a shell-spawning path (victim):
+#        - uninstrumented + "pwn"  -> spawns a shell (attack succeeds)
+#        - instrumented   + "pwn"  -> the execve is blocked at the syscall gate
+#   3. The blocked syscall set is diversified per deployment (MTD_BLOCK).
+#
+# No ptrace: everything runs inside the process, so this works under Rosetta 2.
 #
 set -uo pipefail
 cd "$(dirname "$0")"
 
 hr() { printf '%.0s-' {1..70}; echo; }
 
-# Auto-build if needed. Inside Docker, e9patch is prebuilt at $E9 (=/opt/e9patch)
-# so setup.sh is unnecessary; locally, run ./setup.sh first if e9patch is absent.
-if [ ! -x ./mtd_tracer ] || [ ! -x ./hello.mtd ] || [ ! -x ./evil ]; then
-    if [ -z "${E9:-}" ] && [ ! -x ./e9patch/e9tool ]; then
-        echo "e9patch not found. Run ./setup.sh first (or use Docker: e9patch is prebuilt)."
-        exit 1
-    fi
-    echo "[build] compiling tracer, demo programs and instrumented binaries ..."
-    make || { echo "build failed"; exit 1; }
-    echo
+if [ -z "${E9:-}" ] && [ ! -x ./e9patch/e9tool ]; then
+    echo "e9patch not found. Run ./setup.sh first (Docker: e9patch is prebuilt)."
+    exit 1
 fi
+echo "[build] make clean && make ..."
+make clean >/dev/null 2>&1 || true
+make || { echo "build failed"; exit 1; }
+echo
 
-hr; echo "1) Trusted program through the MTD tracer (should run normally):"; hr
-./mtd_tracer ./hello.mtd
+hr; echo "1) Trusted program with the MTD gate active (runs normally):"; hr
+./hello.mtd
 
 echo
-hr; echo "2a) Un-instrumented 'shellcode' WITHOUT the tracer (attack succeeds):"; hr
-./evil
+hr; echo "2a) Trusted 'victim' program, benign run:"; hr
+./victim.mtd
 
 echo
-hr; echo "2b) Same 'shellcode' WITH the MTD tracer (attack detected & blocked):"; hr
-./mtd_tracer ./evil
+hr; echo "2b) 'victim pwn' WITHOUT MTD (shell-spawning path succeeds):"; hr
+./victim pwn
+
 echo
-echo "(exit $? from the tracer: non-zero means the intrusion was blocked.)"
+hr; echo "2c) 'victim pwn' WITH the MTD syscall gate (execve blocked):"; hr
+./victim.mtd pwn
+rc=$?
+echo "(exit ${rc} from victim.mtd: 42 means the MTD gate blocked the shell.)"
+
+echo
+hr; echo "3) Diversified policy (MTD_BLOCK): same binary, different gate per run."; hr
+echo "   This run additionally blocks write(1), so even the benign printf is"
+echo "   stopped at the gate -- proving the policy is live and configurable:"
+MTD_BLOCK="1,59,322" ./victim.mtd
+echo "(different servers/runs can monitor different syscall sets -- a moving target.)"

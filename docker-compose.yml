@@ -20,12 +20,9 @@ services:
       - ./:/work                   # live-mount the repo (edits persist to host)
     environment:
       - E9=/opt/e9patch            # prebuilt e9patch v1.0.1 (see Dockerfile)
-    # ptrace-based mtd_tracer needs these; Docker drops CAP_SYS_PTRACE and
-    # applies a seccomp profile that blocks ptrace by default.
-    cap_add:
-      - SYS_PTRACE
-    security_opt:
-      - seccomp:unconfined
+    # NOTE: Exercise 2 is now fully in-process (e9patch hook, no ptrace), so no
+    # extra capabilities are required. (SYS_PTRACE / seccomp:unconfined would be
+    # needed only for the native-x86_64 ptrace variant, which Rosetta cannot run.)
     # Convenience: expose the Exercise 1 demo ports to the host so you can
     # curl / open them from your machine (the app shuffles across these).
     ports:

@@ -15,6 +15,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         g++ \
         make \
+        xxd \
+        markdown \
+        zlib1g-dev \
         python3 \
         python3-pip \
         curl \
@@ -30,8 +33,13 @@ RUN pip3 install --no-cache-dir pwntools || \
     echo "WARNING: pwntools install failed; the advanced smashme demo will be unavailable"
 
 # Build e9patch v1.0.1 from source (June 2026 release).
+# NOTE: e9patch's build.sh uses `make -j$(nproc)`, which has a dependency race
+# (e9tool links against contrib/libdw/libdw.a before that sub-make finishes).
+# The race shows up under emulation/timing, so we force a serial build (-j1).
 RUN git clone --depth 1 --branch v1.0.1 https://github.com/GJDuck/e9patch /opt/e9patch \
-    && cd /opt/e9patch && ./build.sh \
+    && cd /opt/e9patch \
+    && sed -i 's/make -j\$(nproc) release/make -j1 release/' build.sh \
+    && ./build.sh \
     && test -x /opt/e9patch/e9tool && test -x /opt/e9patch/e9patch
 
 # The exercise Makefile uses $E9 to locate e9patch (default ./e9patch).
