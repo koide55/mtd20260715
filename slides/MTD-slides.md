@@ -373,10 +373,10 @@ syscall番号を観測する実行時コンポーネントを要する。native 
 ## 21. システムコールMTDフレームワークの概要 / Framework Overview（in-process）
 
 ```
-   信頼バイナリ victim.mtd（e9patchで全 syscall 命令を計装済み）
+   信頼バイナリ victim.mtd（動的リンク・自前 syscall 命令を e9patch で計装）
    ┌────────────────────────────────────────────────────────────┐
    │  ... アプリのコード ...                                      │
-   │        │ 各 syscall 命令の直前で                             │
+   │        │ 自前インライン syscall 命令の直前で                 │
    │        ▼                                                     │
    │   ┌──────────────── syscall_mtd フック（プロセス内）───────┐ │
    │   │ state->rax（syscall番号）をポリシーと照合               │ │
@@ -387,9 +387,8 @@ syscall番号を観測する実行時コンポーネントを要する。native 
    遮断集合はデプロイ/実行ごとに多様化（環境変数 MTD_BLOCK）= moving target
 ```
 
-e9patch は syscall 命令を **100% 計装**するため、非実行スタック環境で
-**バイナリ自身の `syscall` ガジェットを再利用してシェルを起動するコード再利用攻撃
-（ret2syscall / ROP）**もこのゲートを通り、検知・遮断できる。
+制御を奪われた実行フローがこのゲートに funnel してシェル（execve）を起動しようとしても、
+フックが検知・遮断する。（対象は動的リンク＋自前インライン syscall。理由は次スライド末尾）
 
 ---
 
@@ -420,11 +419,11 @@ void entry(struct STATE *state) {            // 各 syscall 命令の直前
 `e9tool` コマンド（v1.0.1 構文）:
 
 ```console
-$ E9PATCH/e9compile.sh syscall_mtd.c -I E9PATCH/examples -DNO_GLIBC=1
+$ E9PATCH/e9compile.sh syscall_mtd.c -I E9PATCH/examples
 $ E9PATCH/e9tool -M 'asm=/syscall/' -P 'before entry(state)@syscall_mtd' victim -o victim.mtd
 ```
 
-> `-DNO_GLIBC=1` は静的リンク対象に必須。ptrace を使わないので特別な権限は不要。
+> 対象は動的リンクなので `-DNO_GLIBC` 不要。ptrace を使わないので特別な権限も不要。
 
 ---
 
@@ -435,15 +434,15 @@ $ docker compose exec lab ./exercise2-syscall-mtd/run_demo.sh
 ```
 
 ```console
-# 1) 正規プログラムはゲート有効でも普通に動く
+# 1) 正規プログラムはゲート有効でも普通に動く（inline write は許可）
 [mtd] syscall gate active (instance 0x...); blocking: execve(59) execveat(322)
-Hello, world
+victim: doing benign work (inline write syscall)
 
-# 2b) MTDなしで victim を攻撃 → シェル奪取
+# 2a) MTDなしで victim を攻撃 → シェル奪取
 $ ./victim pwn
 ### SHELL OBTAINED (uid=0)
 
-# 2c) MTDありで victim を攻撃 → execve がゲートで遮断
+# 2b) MTDありで victim を攻撃 → execve がゲートで遮断
 $ ./victim.mtd pwn
 [mtd] INTRUSION BLOCKED: disallowed system call execve (rax=59) at syscall gate 0x...
 (exit 42)
@@ -453,19 +452,21 @@ $ ./victim.mtd pwn
 
 ## 23b. なぜ検知できるのか / Why Detection Works
 
-- 信頼バイナリの syscall 命令は **書き換え時に既知**なので e9tool が **100%** フック済み。
-  → プログラムの正規パスも、そこへ **funnel してくるコード再利用攻撃も同じゲート**を通る。
+- 信頼バイナリ内の syscall 命令は **書き換え時に既知**なので e9tool がフック済み。
+  → プログラムの正規パスも、そこへ **funnel してくる攻撃も同じゲート**を通る。
 - ゲート（フック）は現在のポリシーに無い syscall（例: `execve`）を **侵入として遮断**する。
 - 遮断集合をデプロイ/時間で多様化すれば、攻撃者が前提にできる syscall ABI が不確実になる。
 
-**限界 / Limitation:** 実行可能スタック上に**独自の `syscall` 命令**を持つ純粋な注入
-シェルコードは計装対象外（＝ゲートを通らない）。現代の NX スタック環境では攻撃は
-ret2syscall 等でバイナリ自身のゲートを再利用するため、本方式が有効になる。
+**計装対象と限界 / Scope & limitation:**
+Rosetta 上では静的リンク glibc 起動初期の計装がクラッシュするため、本演習は
+**動的リンク + 対象自身のインライン `syscall`** を計装する（起動初期は libc.so 側で対象外）。
+libc.so 経由や実行可能スタック上の独自 syscall は計装対象外。実運用で通常の libc 経由 syscall も
+監視したい場合は、native x86_64 で **libc.so 自体**（または静的バイナリ）を計装する。
 
-*e9patch patches 100% of the trusted binary's syscall sites, so both legitimate calls and a
-code-reuse payload funnelling into them pass through the same gate, where a disallowed syscall
-(e.g. execve) is blocked. Pure injected shellcode with its OWN syscall instruction on an
-executable stack is out of scope; on modern NX stacks attacks reuse the binary's own gate.*
+*Because instrumenting a static glibc's early start-up crashes under Rosetta, this lab
+instruments a dynamically linked program's OWN inline `syscall` instructions. Syscalls via
+libc.so (or on an executable stack) are out of scope; to cover ordinary libc syscalls in a real
+deployment, instrument libc.so (or a static binary) on a native x86_64 host.*
 
 ---
 

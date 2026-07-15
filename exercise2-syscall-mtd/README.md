@@ -25,19 +25,26 @@ on Apple Silicon.*
   Rosetta 由来の SIGTRAP で ptrace 監視が破綻することを確認済み）。
 
 一方 **e9patch の計装コードは完全にユーザ空間で動く**（Rosetta が他のx86_64コードと同様に翻訳）。
-そこで MTD の判定点を**プロセス内**へ移す：フックが**信頼バイナリの全 `syscall` ゲート**に座り、
-per-deployment のシステムコールポリシーを強制する。e9patch は syscall 命令を100%計装するため、
-非実行スタック環境で **バイナリ自身の `syscall` ガジェットを再利用してシェルを起動する
-コード再利用攻撃（ret2syscall / ROP）**もこのゲートを通り、検知・遮断できる。
+そこで MTD の判定点を**プロセス内**へ移す：フックが**信頼バイナリの `syscall` ゲート**に座り、
+per-deployment のシステムコールポリシーを強制する。制御を奪われた実行フローがこのゲートに
+funnel してシェルを起動しようとしても、検知・遮断できる。
 
 *e9patch instrumentation runs entirely in user space, so we move the MTD enforcement point
-INTO the process. The hook sits on every syscall gate of the trusted binary and enforces a
-per-deployment policy. Since e9patch patches 100% of syscall sites, a code-reuse payload
-(ret2syscall/ROP on an NX stack) that spawns a shell through the program's own syscall
-gadget passes through the gate and is blocked.*
+INTO the process. The hook sits on the trusted binary's syscall gates and enforces a
+per-deployment policy; a hijacked control flow funnelling into a gate to spawn a shell is blocked.*
 
-> native x86_64 環境向けの「番号ランダム化 + ptrace で外部syscallを検知」する版に関心が
-> あれば別途用意可能（Rosettaでは不可）。本演習はプロセス内方式に統一している。
+### 重要: 動的リンク + インラインsyscall / Dynamic linking + inline syscalls
+
+Rosetta 上では、**静的リンク glibc の起動初期の syscall を計装するとトランポリンがクラッシュ**する
+（実測: 数命令ぶん動作後に SIGSEGV）。そこで本演習は次のようにして回避する：
+
+- 対象 `victim` を**動的リンク**でビルド（glibc 起動初期の syscall は libc.so 側＝計装対象外）。
+- 監視したい syscall（write / execve）は **`victim` 自身のインラインasm `syscall` 命令**で発行し、
+  そこだけを e9patch が計装する。
+
+> **実運用では / In a real deployment:** native x86_64 ホストなら `libc.so` 自体を計装すれば
+> 通常の libc 経由の syscall も監視できる（静的バイナリの計装でも可）。本演習は Rosetta/Docker
+> で確実に動くようインライン方式にしている。
 
 ---
 
@@ -70,21 +77,17 @@ $ ./run_demo.sh
 ## 期待される出力 / Expected output
 
 ```
-1) Trusted program with the MTD gate active (runs normally):
+1) Trusted program, benign run, MTD gate active (write allowed):
 [mtd] syscall gate active (instance 0x....); blocking: execve(59) execveat(322)
-Hello, world
+victim: doing benign work (inline write syscall)
 
-2a) Trusted 'victim' program, benign run:
-[mtd] syscall gate active (instance 0x....); blocking: execve(59) execveat(322)
-victim: doing benign work (this printf is a write syscall)
-
-2b) 'victim pwn' WITHOUT MTD (shell-spawning path succeeds):
-victim: doing benign work (this printf is a write syscall)
+2a) 'victim pwn' WITHOUT MTD (shell-spawning path succeeds):
+victim: doing benign work (inline write syscall)
 ### SHELL OBTAINED (uid=0)
 
-2c) 'victim pwn' WITH the MTD syscall gate (execve blocked):
+2b) 'victim pwn' WITH the MTD syscall gate (execve blocked):
 [mtd] syscall gate active (instance 0x....); blocking: execve(59) execveat(322)
-victim: doing benign work (this printf is a write syscall)
+victim: doing benign work (inline write syscall)
 [mtd] INTRUSION BLOCKED: disallowed system call execve (rax=59) at syscall gate 0x...
 (exit 42 from victim.mtd: 42 means the MTD gate blocked the shell.)
 
@@ -93,7 +96,8 @@ victim: doing benign work (this printf is a write syscall)
 [mtd] INTRUSION BLOCKED: disallowed system call write (rax=1) at syscall gate 0x...
 ```
 
-`instance` の値と `gate` アドレスは実行ごとに変わる。
+`instance` の値と `gate` アドレスは実行ごとに変わる。3) では benign な inline write すら
+ゲートで止まる（＝ポリシーが実行時に効いていることの確認）。
 
 ---
 
@@ -101,17 +105,16 @@ victim: doing benign work (this printf is a write syscall)
 
 | ファイル / File | 役割 / Role |
 |---|---|
-| `syscall_mtd.c` | e9patchフック。全 `syscall` ゲートでポリシーを強制し、禁止syscallを検知・遮断 |
-| `hello.c` | 正規プログラム（計装しても普通に動く）/ benign baseline |
-| `victim.c` | 正規プログラムだが `pwn` 指定でシェル起動パスに入る（攻撃をシミュレート）|
+| `syscall_mtd.c` | e9patchフック。`syscall` ゲートでポリシーを強制し、禁止syscallを検知・遮断 |
+| `victim.c` | 動的リンクの被害プログラム。自前インラインsyscallで write/execve を発行（`pwn` でシェル起動）|
 | `setup.sh` | ローカル用: e9patch v1.0.1 をビルド（Dockerでは不要）|
 | `Makefile`, `run_demo.sh` | ビルド・デモ |
 
 ## e9patch コマンド（v1.0.1 構文）
 
 ```console
-# フックをコンパイル（静的リンク対象のため -DNO_GLIBC=1 が必須）
-$ e9patch/e9compile.sh syscall_mtd.c -I e9patch/examples -DNO_GLIBC=1
+# フックをコンパイル（動的リンク対象なので -DNO_GLIBC は不要）
+$ e9patch/e9compile.sh syscall_mtd.c -I e9patch/examples
 
 # 各 syscall 命令の直前にMTDゲートを挿入
 $ e9patch/e9tool -M 'asm=/syscall/' \
@@ -125,7 +128,7 @@ $ e9patch/e9tool -M 'asm=/syscall/' \
 | マッチ | `--match 'asm=sys(?:enter\|call)'` | `-M 'asm=/syscall/'` |
 | パッチ | `--action 'call [before] func(&rax)@func'` | `-P 'before entry(state)@syscall_mtd'` |
 | 引数 | `&rax` | `state`（`state->rax`, `state->rip` を参照）|
-| ヘッダ | 手書き `stdlib.c` | 同梱 `examples/stdlib.c` + `-DNO_GLIBC=1` |
+| ヘッダ | 手書き `stdlib.c` | 同梱 `examples/stdlib.c` |
 
 ## ポリシーのカスタマイズ / Customizing the policy
 
@@ -142,9 +145,9 @@ $ MTD_BLOCK="59,322,257" ./victim.mtd     # openat も遮断
 
 ## グループ演習 / Group discussion
 
-1. Webサービスに外部からバイナリが送り込まれ実行される未知の脆弱性を仮定する。
-   このプロセス内syscallゲート監視で攻撃を検出・防御できるか。できない攻撃形態は何か。
-   （ヒント: 実行可能スタック上の独自 `syscall` 命令は計装対象外。NXスタック＋ret2syscallは対象内。）
+1. このプロセス内syscallゲート監視で検出・防御できる攻撃形態／できない形態は何か。
+   （ヒント: 計装されるのはバイナリ内の `syscall` 命令のみ。libc.so 経由や実行可能スタック上の
+   独自syscallは対象外。実運用でこれらも監視するには何を計装すべきか＝libc.so／静的バイナリ。）
 2. 演習1（URL等）のMTDと同時に組み合わせた場合、「平均攻撃成功時間間隔」はどう変化するか。
 3. 遮断集合をデプロイ／時間ごとに多様化・回転させることの効果と、正規利用者への影響。
 4. **旧版との相違点**: 旧演習はLinuxカーネルのリコンフィグ、その後の版は ptrace を伴った。
@@ -156,9 +159,14 @@ $ MTD_BLOCK="59,322,257" ./victim.mtd     # openat も遮断
 
 ## 検証状況 / Verification status
 
-- **e9patch v1.0.1 のビルドと計装は Docker (amd64/Rosetta) 上で成功を確認済み**（`num_patched 100%`）。
-- ptrace 方式が Rosetta で不可であることを実測で確認（`orig_rax=0` + SIGTRAP）。本演習は
-  その知見を踏まえプロセス内方式に統一した。
-- コード（フック/デモ）は e9patch v1.0.1 の API（`init(argc,argv,envp)`, `struct STATE`,
-  `getenv`, `getrandom`, `exit`, `SYS_execve/execveat`）に準拠。
-- Docker上での `run_demo.sh` の最終実行確認は受講生環境で実施のこと。
+Docker (amd64/Rosetta) 上で実機検証した結果に基づく：
+
+- e9patch v1.0.1 のビルド・計装は成功（`num_patched 100%`）。
+- **ptrace 方式は Rosetta で不可**（実測 `orig_rax=0` + SIGTRAP）→ プロセス内方式へ。
+- **静的リンクの計装は Rosetta でトランポリンがクラッシュ**（実測 SIGSEGV）→ 動的リンク採用。
+- **動的リンク + 自前インライン `syscall` の計装は Rosetta で正常動作を確認**
+  （標準 `print` トランポリンで `syscall` 命令のフック実行→出力→exit 0 を確認）。
+  本演習はこの構成に統一。
+- フックは e9patch v1.0.1 の API（`init(argc,argv,envp)`, `struct STATE`, `getenv`,
+  `getrandom`, `exit`, `SYS_execve/execveat`）に準拠。
+- 完成した `run_demo.sh` の最終通し確認は受講生環境で実施のこと。

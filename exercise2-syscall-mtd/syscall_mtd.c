@@ -2,9 +2,9 @@
  * syscall_mtd.c  --  e9patch v1.0.1 in-process System-call MTD monitor.
  *
  * Compiled with e9compile.sh and injected by e9tool BEFORE every `syscall`
- * instruction of a trusted binary:
+ * instruction of a trusted (dynamically linked) binary:
  *
- *   $ $E9PATCH/e9compile.sh syscall_mtd.c -I $E9PATCH/examples -DNO_GLIBC=1
+ *   $ $E9PATCH/e9compile.sh syscall_mtd.c -I $E9PATCH/examples
  *   $ $E9PATCH/e9tool -M 'asm=/syscall/' \
  *         -P 'before entry(state)@syscall_mtd' victim -o victim.mtd
  *
@@ -22,10 +22,12 @@
  * e9patch instrumentation, however, runs entirely in user space (Rosetta
  * translates it like any other x86_64 code). So we move the MTD enforcement
  * point INTO the process: the hook sits on every `syscall` gate of the trusted
- * binary and enforces a per-deployment syscall policy. Because e9patch patches
- * 100% of the binary's syscall sites, a code-reuse payload (ret2syscall / ROP
- * on a non-executable stack) that funnels control into the program's OWN
- * `syscall` gadget to spawn a shell is observed here -- and blocked.
+ * binary and enforces a per-deployment syscall policy. The trusted program
+ * issues the monitored syscalls through its OWN inline `syscall` instructions
+ * (see victim.c), which e9patch instruments; a hijacked control flow that
+ * funnels into such a gate to spawn a shell (execve) is observed and blocked.
+ * (On a native x86_64 host you would instead instrument libc.so or a static
+ * binary so ordinary libc syscalls are covered -- see the README.)
  *
  * The "moving target" element: the monitored/blocked syscall set is diversified
  * per deployment (configurable via the MTD_BLOCK environment variable) and can

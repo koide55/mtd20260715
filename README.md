@@ -26,8 +26,7 @@ mtd20260715/
     ├── README.md
     ├── setup.sh                   ← ローカル用: e9patch v1.0.1 をビルド（Docker不要）
     ├── syscall_mtd.c              ← e9patchフック（syscallゲート監視）/ in-process MTD monitor
-    ├── hello.c                    ← 正規プログラム / benign baseline
-    ├── victim.c                   ← シェル起動パスを持つ被害プログラム / victim with a shell path
+    ├── victim.c                   ← 自前インラインsyscallでシェル起動パスを持つ被害プログラム
     ├── Makefile
     └── run_demo.sh
 ```

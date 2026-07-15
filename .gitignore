@@ -2,7 +2,6 @@
 exercise2-syscall-mtd/e9patch/
 
 # Build artifacts
-exercise2-syscall-mtd/hello
 exercise2-syscall-mtd/victim
 exercise2-syscall-mtd/syscall_mtd
 exercise2-syscall-mtd/*.o
