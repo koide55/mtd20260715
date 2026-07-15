@@ -4,7 +4,9 @@
 
 更新日 / Updated: 2026-07-15
 本資料は 2025-07-27 版スライド (`MTD-prosecit-20250727.pdf`) をMarkdown化し、
-演習2 (システムコールMTD) を **e9patch v1.0.1**（2026年6月リリース）向けに全面刷新したものです。
+演習2 (システムコールMTD) を **e9patch v1.0.1**（2026年6月リリース）向けに全面刷新、
+さらに演習1・2を組み合わせた**演習3（多層防御）**を新設したものです。
+演習は **Docker Compose** で実行でき、Apple Silicon (Rosetta 2) でも動作します。
 
 ---
 
@@ -158,9 +160,10 @@ unpredictability and/or uncertainty.*
 | **OS-host** | IPアドレス, **システムコール番号 / System Call Numbering** | Windows/Linux/Unix の各種バージョン | ホストOS・VM複製 |
 | **VM-instance** | 仮想IPアドレス, フェイルオーバー | VMware, ESXi, KVM, VirtualBox 等 | ハイパーバイザ複製 |
 
-> 本演習では **Application層のポート番号 (演習1)** と **OS-host層のシステムコール番号 (演習2)** を扱う。
+> 本演習では **Application層のポート番号 (演習1)** と **OS-host層のシステムコール番号 (演習2)**
+> を扱い、**演習3**でこの2層を組み合わせた多層防御を体験する。
 > This hands-on covers **port numbering at the Application layer (Ex.1)** and
-> **system call numbering at the OS-host layer (Ex.2)**.
+> **system call numbering at the OS-host layer (Ex.2)**, then **Ex.3 combines both layers**.
 
 ---
 
@@ -478,10 +481,10 @@ deployment, instrument libc.so (or a static binary) on a native x86_64 host.*
 
 **グループ演習 / Group (discuss & present, 30 min):**
 
-1. Webサービスに外部からバイナリが送り込まれ実行される未知の脆弱性があると仮定する。
-   このプロセス内syscallゲート監視で検出・防御できる攻撃形態／できない形態は何か。
-   （ヒント: 実行可能スタック上の独自syscall命令は対象外。NXスタック＋ret2syscallは対象内。）
-2. 演習1のような別のMTD（URL等）と同時に組み合わせた場合、「平均攻撃成功時間間隔」はどう変化するか。
+1. このプロセス内syscallゲート監視で検出・防御できる攻撃形態／できない形態は何か。
+   （ヒント: 計装されるのはバイナリ内の syscall 命令のみ。libc.so 経由や実行可能スタック上の
+   独自syscallは対象外。実運用で通常の libc 経由も監視するには libc.so／静的バイナリを計装。）
+2. 演習1のような別のMTD（URL等）と同時に組み合わせた場合、「平均攻撃成功時間間隔」はどう変化するか（→演習3）。
 3. 遮断・監視する syscall 集合をデプロイ／時間ごとに多様化・回転させる効果と、正規利用者への影響。
 4. **旧版との相違点**: 旧演習はLinuxカーネルのリコンフィグ、その後の版は ptrace を伴った。
    本版（e9patch v1.0.1・プロセス内・カーネル非依存）との相違点・利点・欠点は何か。
@@ -490,7 +493,80 @@ deployment, instrument libc.so (or a static binary) on a native x86_64 host.*
 
 ---
 
-## 25. 議論: 新しいMTDを考えたい / Discussion: New MTD Ideas
+# 演習3: 多層防御シナリオ（ネットワークMTD × システムコールMTD）
+# Exercise 3: Defense in Depth (network MTD × syscall MTD)
+
+---
+
+## 25. 多層防御の考え方 / Defense in Depth
+
+演習1（ネットワークレベル）と演習2（システムコールレベル）を**独立した2層**として重ねる。
+
+```
+             ┌──────────── 第1層 / Layer 1: network MTD ───────────┐
+  攻撃者   ─▶│  サービスが秘密のポート系列を移動 :8123→:9001→...    │
+ (固定ポート)│  正規クライアントは系列を追従（成功率 高）           │
+             │  固定ポートの攻撃者は標的を見失う（成功窓が縮小）    │
+             └───────────────────────┬─────────────────────────────┘
+                                      │ 万一の侵入・コード実行
+                                      ▼
+             ┌──────────── 第2層 / Layer 2: syscall MTD ───────────┐
+             │  ペイロードの execve("/bin/sh") が syscallゲートで   │
+             │  遮断される → [mtd] INTRUSION BLOCKED (exit 42)      │
+             └─────────────────────────────────────────────────────┘
+```
+
+- **第1層**は攻撃者の**偵察・探索コスト**を増やす（攻撃の入口を動かす）。
+- **第2層**は侵入後の**ペイロードを無効化**する（最後の砦）。
+- 2層は攻撃キルチェーンの異なる段階に効くため、効果は概ね**掛け算**で積み上がる。
+
+---
+
+## 26. 演習3を試す / Let's Try Exercise 3
+
+```console
+$ docker compose exec lab ./exercise3-combined/scenario.sh
+```
+
+期待される出力（抜粋）/ expected output:
+
+```console
+LAYER 1 -- Network-level MTD (URL / port shuffling)
+  round 0: legit client -> :8123  OK     attacker -> :8123  HIT
+  round 1: legit client -> :9001  OK     attacker -> :8123  miss
+  round 2: legit client -> :9002  OK     attacker -> :8123  miss
+  ...
+  legitimate client success: 5/5
+  attacker (fixed port)     : 1/5   -> 攻撃の成功窓が縮小
+
+LAYER 2 -- Syscall-level MTD (in-process gate)
+  [no MTD]      ./victim pwn      -> ### SHELL OBTAINED (uid=0)
+  [syscall MTD] ./victim.mtd pwn  -> [mtd] INTRUSION BLOCKED ... execve (rax=59)
+```
+
+正規クライアントは常にサービスに到達でき（5/5）、固定ポートの攻撃者はほぼ失敗（1/5）。
+仮に侵入されても、シェル起動は第2層で遮断される。
+
+---
+
+## 27. MTD演習3 (課題) / Exercise 3 Assignment
+
+**個人演習 / Individual (hands-on):**
+
+1. `exercise3-combined/scenario.sh` を実行し、2層の効果を観察する。
+
+**グループ演習 / Group (discuss & present):**
+
+1. **平均攻撃成功時間間隔 (MTTC)**: 第1層のみ／第2層のみ／両方で、攻撃コストや MTTC は
+   どう変化するか。層は「積」で効くのか「和」で効くのか。
+2. 第1層はポート系列の秘密性に依存する。この秘密はどのように漏れうるか
+   （タイミング・トラフィック解析・内部者）。漏れても第2層がある価値は。
+3. 各層が正規利用者に課す負担（可用性・遅延・運用コスト）。多層化の費用対効果をどう取るか。
+4. アプリ層・VM層のMTDを加えた、さらなる多層化の設計案を出せ（スライド10の階層表を参照）。
+
+---
+
+## 28. 議論: 新しいMTDを考えたい / Discussion: New MTD Ideas
 
 **変更できるパラメータ (What?) の例:**
 

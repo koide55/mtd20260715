@@ -22,13 +22,16 @@ mtd20260715/
 │   ├── README.md
 │   ├── mtdnet.py                  ← MTD機能付きWebアプリ / MTD web app
 │   └── demo.sh
-└── exercise2-syscall-mtd/         ← 演習2: システムコールレベルMTD（プロセス内）
+├── exercise2-syscall-mtd/         ← 演習2: システムコールレベルMTD（プロセス内）
+│   ├── README.md
+│   ├── setup.sh                   ← ローカル用: e9patch v1.0.1 をビルド（Docker不要）
+│   ├── syscall_mtd.c              ← e9patchフック（syscallゲート監視）/ in-process MTD monitor
+│   ├── victim.c                   ← 自前インラインsyscallでシェル起動パスを持つ被害プログラム
+│   ├── Makefile
+│   └── run_demo.sh
+└── exercise3-combined/            ← 演習3: 多層防御（演習1×演習2）
     ├── README.md
-    ├── setup.sh                   ← ローカル用: e9patch v1.0.1 をビルド（Docker不要）
-    ├── syscall_mtd.c              ← e9patchフック（syscallゲート監視）/ in-process MTD monitor
-    ├── victim.c                   ← 自前インラインsyscallでシェル起動パスを持つ被害プログラム
-    ├── Makefile
-    └── run_demo.sh
+    └── scenario.sh                ← ネットワークMTD × syscall MTD の統合シナリオ
 ```
 
 ## はじめかた（Docker Compose 推奨）/ Getting started (Docker Compose, recommended)
@@ -51,10 +54,11 @@ $ docker compose down                    # 停止・削除 / stop & remove
 アクセスできる（ポートは compose で公開済み）：
 
 ```console
+$ docker compose exec lab ./exercise2-syscall-mtd/run_demo.sh   # 演習2デモ
+$ docker compose exec lab ./exercise3-combined/scenario.sh      # 演習3（多層防御）
+
+# 演習1をコンテナ内で起動するとホストの localhost:8123 等からアクセス可能
 $ docker compose exec lab bash -lc "cd exercise1-network-mtd && ./demo.sh"
-# または手動で / or manually:
-$ docker compose exec -d lab python3 exercise1-network-mtd/mtdnet.py 8123
-$ curl localhost:8123                     # ホスト側から / from the host
 ```
 
 ### Apple Silicon (M1/M2/M3…) について / On Apple Silicon
@@ -62,11 +66,11 @@ $ curl localhost:8123                     # ホスト側から / from the host
 e9patch は x86_64 専用だが、本イメージは `platform: linux/amd64` 指定のため
 **Docker Desktop の Rosetta 2 エミュレーション**で動作する。Docker Desktop の
 設定 →「Use Rosetta for x86/amd64 emulation on Apple Silicon」を有効にすること。
-`mtd_tracer` の ptrace 用に `SYS_PTRACE` と `seccomp:unconfined` を compose で付与済み。
+演習2はptraceを使わない**プロセス内方式**なので、特別な権限（`SYS_PTRACE` 等）は不要。
 
 *e9patch is x86_64-only, but the image is `linux/amd64` and runs under Docker Desktop's
 Rosetta 2. Enable "Use Rosetta for x86/amd64 emulation" in Docker Desktop settings.
-The compose file already grants `SYS_PTRACE` and `seccomp:unconfined` for the ptrace tracer.*
+Exercise 2 is fully in-process (no ptrace), so no special capabilities are required.*
 
 ## ローカル（Dockerを使わない）/ Running locally without Docker
 
@@ -86,12 +90,19 @@ $ cd exercise2-syscall-mtd
 $ ./setup.sh && make && ./run_demo.sh
 ```
 
+**演習3 / Exercise 3**（演習1・2を組み合わせた多層防御シナリオ）:
+
+```console
+$ cd exercise3-combined && ./scenario.sh      # 事前に演習2の ./setup.sh を実施
+```
+
 ## 主な更新点 / Key updates in this revision
 
 - スライド全35ページをMarkdown化（日英併記を維持）。
 - 演習2を **e9patch v1.0.1** の新しい `-M`/`-P` 構文と同梱 `stdlib.c` API に更新。
 - 演習2からAWS EC2・カーネルリコンフィグ前提を排除。さらに **ptrace 非依存の
   プロセス内方式**に再設計し、**Apple Silicon の Docker (Rosetta 2) でも動作**するように。
+- **演習3（多層防御）を新設** — ネットワークMTD × システムコールMTD の統合シナリオ。
 - **Docker Compose** で受講生が同一環境を再現できるように（`Dockerfile` に e9patch 同梱）。
 - 演習1のWebアプリ (`mtdnet.py`) をPython 3.12+対応・レース排除版に更新。
 
