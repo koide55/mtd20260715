@@ -1,0 +1,17 @@
+# e9patch is fetched/built by exercise2-syscall-mtd/setup.sh
+exercise2-syscall-mtd/e9patch/
+
+# Build artifacts
+exercise2-syscall-mtd/mtd_tracer
+exercise2-syscall-mtd/hello
+exercise2-syscall-mtd/evil
+exercise2-syscall-mtd/smashme
+exercise2-syscall-mtd/syscall_mtd
+exercise2-syscall-mtd/*.o
+exercise2-syscall-mtd/*.mtd
+exercise2-syscall-mtd/a.out
+
+# Python / misc
+__pycache__/
+*.pyc
+*.log

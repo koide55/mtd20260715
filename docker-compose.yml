@@ -1,0 +1,37 @@
+# Docker Compose for the MTD hands-on lab.
+#
+#   docker compose up -d --build          # build image (builds e9patch) & start
+#   docker compose exec lab ./exercise2-syscall-mtd/run_demo.sh
+#   docker compose exec lab bash          # interactive shell
+#   docker compose down                    # stop & remove
+#
+# Apple Silicon (M1/M2/M3...): this uses linux/amd64 via Docker Desktop's
+# Rosetta 2 emulation. Enable Docker Desktop > Settings > General >
+# "Use Rosetta for x86/amd64 emulation on Apple Silicon".
+services:
+  lab:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mtd-hands-on:2026
+    platform: linux/amd64          # e9patch is x86_64-only (Rosetta on Apple Silicon)
+    working_dir: /work
+    volumes:
+      - ./:/work                   # live-mount the repo (edits persist to host)
+    environment:
+      - E9=/opt/e9patch            # prebuilt e9patch v1.0.1 (see Dockerfile)
+    # ptrace-based mtd_tracer needs these; Docker drops CAP_SYS_PTRACE and
+    # applies a seccomp profile that blocks ptrace by default.
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
+    # Convenience: expose the Exercise 1 demo ports to the host so you can
+    # curl / open them from your machine (the app shuffles across these).
+    ports:
+      - "8123:8123"
+      - "9999:9999"
+      - "8111:8111"
+    stdin_open: true
+    tty: true
+    command: ["sleep", "infinity"]

@@ -1,0 +1,8 @@
+# The image doesn't COPY the repo (it's bind-mounted at runtime), so keep the
+# build context tiny. e9patch is cloned inside the image, not from here.
+.git
+exercise2-syscall-mtd/e9patch
+**/__pycache__
+*.log
+*.mtd
+*.o
