@@ -319,7 +319,8 @@ $ docker compose exec lab bash        # 対話シェル / interactive shell
 - **Apple Silicon (M1/M2/M3…)** でも動作する。イメージは `platform: linux/amd64` 指定で、
   **Docker Desktop の Rosetta 2** エミュレーションで実行される。
   Docker Desktop 設定の「Use Rosetta for x86/amd64 emulation」を有効にすること。
-- ptrace 用の `SYS_PTRACE` / `seccomp:unconfined` は `docker-compose.yml` で付与済み。
+- ptrace を使わない**プロセス内方式**なので、`SYS_PTRACE` / `seccomp:unconfined` などの
+  特別な権限は不要（`docker-compose.yml` でも付与していない）。
 
 Dockerを使わない場合（x86_64 Linux 上）/ Without Docker (on x86_64 Linux):
 
