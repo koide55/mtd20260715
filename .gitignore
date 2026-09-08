@@ -12,3 +12,6 @@ exercise2-syscall-mtd/a.out
 __pycache__/
 *.pyc
 *.log
+
+# Claude Code のローカル設定(許可済みコマンドの履歴を含み、秘密情報が混入し得る)
+.claude/
